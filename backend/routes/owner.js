@@ -6,15 +6,27 @@ import { requireAuth, requireRole } from '../middleware/auth.js';
 const router = Router();
 
 // Ambil toko milik owner yang sedang login
-async function getOwnerStore(userId) {
-  const { rows } = await pool.query('SELECT * FROM stores WHERE owner_id = $1', [userId]);
+// Ambil toko milik owner. Jika storeId diberikan, ambil toko itu (dan pastikan milik owner);
+// jika tidak, pakai toko pertama. Owner boleh punya lebih dari satu toko.
+async function getOwnerStore(userId, storeId) {
+  if (storeId) {
+    const { rows } = await pool.query('SELECT * FROM stores WHERE owner_id = $1 AND id = $2', [userId, storeId]);
+    return rows[0] || null;
+  }
+  const { rows } = await pool.query('SELECT * FROM stores WHERE owner_id = $1 ORDER BY id ASC LIMIT 1', [userId]);
   return rows[0] || null;
 }
+
+// Toko yang dipilih di dashboard dikirim lewat ?store_id= atau body.store_id
+const pickStoreId = (req) => {
+  const v = Number(req.query?.store_id ?? req.body?.store_id);
+  return Number.isInteger(v) && v > 0 ? v : undefined;
+};
 
 // 1. Profil toko milik owner
 router.get('/my-store', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Anda belum mendaftarkan toko' });
 
     const { rows: packages } = await pool.query('SELECT * FROM packages WHERE store_id = $1', [store.id]);
@@ -33,7 +45,12 @@ router.get('/my-store', requireAuth, requireRole('owner'), async (req, res) => {
       [store.id]
     );
 
-    res.json({ store, packages, schedules, methods, employees });
+    const { rows: stores } = await pool.query(
+      'SELECT id, name FROM stores WHERE owner_id = $1 ORDER BY id ASC',
+      [req.user.id]
+    );
+
+    res.json({ store, stores, packages, schedules, methods, employees });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Gagal mengambil data toko' });
@@ -43,7 +60,7 @@ router.get('/my-store', requireAuth, requireRole('owner'), async (req, res) => {
 // 2. Update pengaturan toko
 router.put('/settings', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { max_service_distance_km, delivery_fee_per_km, name, phone, address_text } = req.body;
@@ -68,7 +85,7 @@ router.put('/settings', requireAuth, requireRole('owner'), async (req, res) => {
 // 3. Metode layanan
 router.post('/service-methods', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { method, is_enabled } = req.body;
@@ -88,7 +105,7 @@ router.post('/service-methods', requireAuth, requireRole('owner'), async (req, r
 // 4. Paket cuci
 router.post('/packages', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { name, description, is_waterless, price_car, price_motorcycle, estimated_duration_minutes } = req.body;
@@ -107,7 +124,7 @@ router.post('/packages', requireAuth, requireRole('owner'), async (req, res) => 
 
 router.put('/packages/:id', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { name, description, is_waterless, price_car, price_motorcycle, is_active } = req.body;
@@ -134,7 +151,7 @@ router.put('/packages/:id', requireAuth, requireRole('owner'), async (req, res) 
 router.post('/employees/create', requireAuth, requireRole('owner'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const name = String(req.body.name || '').trim();
@@ -186,7 +203,7 @@ router.post('/employees/create', requireAuth, requireRole('owner'), async (req, 
 // 5b. Pemilik MENAUTKAN akun yang sudah ada ke tokonya (lewat email)
 router.post('/employees', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const email = String(req.body.email || '').trim().toLowerCase();
@@ -226,7 +243,7 @@ router.post('/employees', requireAuth, requireRole('owner'), async (req, res) =>
 router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const orderId = Number(req.params.orderId);
@@ -234,9 +251,13 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
 
     const employeeIds = [...new Set((req.body.employee_ids || []).map(Number))].filter(Number.isInteger);
 
+    // Cari pesanan lewat pemilik toko (bukan lewat satu toko saja),
+    // supaya cocok dengan daftar pesanan yang tampil di dashboard.
     const { rows: orderRows } = await client.query(
-      'SELECT * FROM orders WHERE id = $1 AND store_id = $2',
-      [orderId, store.id]
+      `SELECT o.* FROM orders o
+       JOIN stores s ON s.id = o.store_id
+       WHERE o.id = $1 AND s.owner_id = $2`,
+      [orderId, req.user.id]
     );
     const order = orderRows[0];
     if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
@@ -256,10 +277,10 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
     if (employeeIds.length > 0) {
       const { rows: valid } = await client.query(
         'SELECT id FROM store_employees WHERE store_id = $1 AND id = ANY($2::int[])',
-        [store.id, employeeIds]
+        [order.store_id, employeeIds]
       );
       if (valid.length !== employeeIds.length) {
-        return res.status(400).json({ message: 'Ada pegawai yang bukan bagian dari toko Anda.' });
+        return res.status(400).json({ message: 'Pegawai yang dipilih bukan pegawai toko pesanan ini. Pindah ke toko yang sesuai di dashboard, lalu coba lagi.' });
       }
     }
 
@@ -284,7 +305,7 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
   } catch (err) {
     await client.query('ROLLBACK').catch(() => { });
     console.error(err);
-    res.status(500).json({ message: 'Gagal menerima pesanan' });
+    res.status(500).json({ message: 'Gagal menerima pesanan: ' + err.message });
   } finally {
     client.release();
   }
@@ -293,7 +314,7 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
 // 6b. Tolak pesanan
 router.post('/orders/:orderId/reject', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { reason } = req.body;
@@ -303,9 +324,11 @@ router.post('/orders/:orderId/reject', requireAuth, requireRole('owner'), async 
            payment_status = CASE WHEN payment_status = 'paid' THEN 'refunded' ELSE payment_status END,
            customer_notes = COALESCE(customer_notes, '') || ' [Ditolak toko: ' || $1 || ']',
            updated_at = NOW()
-       WHERE id = $2 AND store_id = $3 AND order_status = 'waiting_store_confirmation'
+       WHERE id = $2
+         AND store_id IN (SELECT id FROM stores WHERE owner_id = $3)
+         AND order_status = 'waiting_store_confirmation'
        RETURNING *`,
-      [reason || 'Toko tidak dapat menerima pesanan saat ini', req.params.orderId, store.id]
+      [reason || 'Toko tidak dapat menerima pesanan saat ini', req.params.orderId, req.user.id]
     );
     if (!rows[0]) {
       return res.status(400).json({ message: 'Pesanan tidak ditemukan atau tidak bisa ditolak lagi.' });
@@ -321,7 +344,7 @@ router.post('/orders/:orderId/reject', requireAuth, requireRole('owner'), async 
 // 7. Balas ulasan
 router.post('/reviews/:id/reply', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { reply } = req.body;
@@ -342,7 +365,7 @@ router.post('/reviews/:id/reply', requireAuth, requireRole('owner'), async (req,
 // 8a. Keuangan
 router.get('/finance', requireAuth, requireRole('owner'), async (req, res) => {
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { rows: withdrawals } = await pool.query(
@@ -361,7 +384,7 @@ router.get('/finance', requireAuth, requireRole('owner'), async (req, res) => {
 router.post('/finance/withdraw', requireAuth, requireRole('owner'), async (req, res) => {
   const client = await pool.connect();
   try {
-    const store = await getOwnerStore(req.user.id);
+    const store = await getOwnerStore(req.user.id, pickStoreId(req));
     if (!store) return res.status(404).json({ message: 'Toko tidak ditemukan' });
 
     const { amount, bank_name, bank_account_number, bank_account_holder } = req.body;
