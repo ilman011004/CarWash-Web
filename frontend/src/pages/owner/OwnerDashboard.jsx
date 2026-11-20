@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import OrderChat from '../../components/OrderChat';
 import LiveTrackingMap from '../../components/LiveTrackingMap';
+import StoreRegistration from './store-registration';
 
 const rupiah = (n) => 'Rp ' + parseInt(n || 0, 10).toLocaleString('id-ID');
 
@@ -195,15 +196,18 @@ export default function OwnerDashboard() {
 
   if (loading) return <div className="text-center py-20 text-slate-500">Memuat dashboard toko...</div>;
 
-  if (!data?.store) {
+  // Toko belum ada, atau sudah ada tetapi belum punya paket: tampilkan wizard onboarding.
+  if (!data?.store || (data.packages || []).length === 0) {
     return (
-      <div className="max-w-2xl mx-auto px-4 py-16 text-center">
-        <Store className="w-12 h-12 text-slate-400 mx-auto mb-3" />
-        <h2 className="text-xl font-bold">Anda belum memiliki toko</h2>
-        <p className="text-sm text-slate-500 mb-4">
-          Toko Anda mungkin telah dihapus oleh admin, atau belum didaftarkan. Hubungi admin untuk informasi lebih lanjut.
-        </p>
-      </div>
+      <StoreRegistration
+        key={data?.store?.id ?? 'new'}
+        store={data?.store || null}
+        packages={data?.packages || []}
+        onFinished={(id) => {
+          setLoading(true);
+          loadData(id ?? null);
+        }}
+      />
     );
   }
 

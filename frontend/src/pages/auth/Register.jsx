@@ -48,9 +48,8 @@ export default function Register() {
             <label className="block text-xs font-semibold text-slate-600 mb-1">Mendaftar Sebagai</label>
             <div className="grid grid-cols-2 gap-3">
               <label
-                className={`flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs font-semibold ${
-                  role === 'customer' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200'
-                }`}
+                className={`flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs font-semibold ${role === 'customer' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200'
+                  }`}
               >
                 <input
                   type="radio"
@@ -62,9 +61,8 @@ export default function Register() {
                 Pelanggan
               </label>
               <label
-                className={`flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs font-semibold ${
-                  role === 'owner' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200'
-                }`}
+                className={`flex items-center justify-center gap-2 p-2.5 rounded-lg border cursor-pointer text-xs font-semibold ${role === 'owner' ? 'border-blue-600 bg-blue-50 text-blue-700' : 'border-slate-200'
+                  }`}
               >
                 <input
                   type="radio"
@@ -76,6 +74,11 @@ export default function Register() {
                 Pemilik Toko
               </label>
             </div>
+            {role === 'owner' && (
+              <p className="text-[11px] text-slate-500 mt-2">
+                Setelah akun dibuat, Anda akan diminta mengisi data toko untuk didaftarkan di CarWash Hub.
+              </p>
+            )}
           </div>
 
           <div>

@@ -71,6 +71,61 @@ router.patch('/stores/:id/commission', async (req, res) => {
   res.json({ message: 'Komisi khusus toko berhasil diatur', store: rows[0] });
 });
 
+// Hapus toko permanen beserta seluruh data turunannya.
+// Akun pemilik & pegawai (tabel users) tetap ada; hanya relasi store_employees yang dihapus.
+router.delete('/stores/:id', async (req, res) => {
+  const storeId = Number(req.params.id);
+  if (!Number.isInteger(storeId) || storeId <= 0) {
+    return res.status(400).json({ message: 'ID toko tidak valid' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query('SELECT id, name FROM stores WHERE id = $1', [storeId]);
+    if (!rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'Toko tidak ditemukan' });
+    }
+
+    // Urutan penting: hapus tabel yang merujuk tabel lain lebih dulu.
+    // Tabel yang tidak ada di database dilewati (delIfExists), jadi tidak error "relation does not exist".
+    const orderIds = 'SELECT id FROM orders WHERE store_id = $1';
+
+    const delIfExists = async (table, sql) => {
+      const { rows: chk } = await client.query('SELECT to_regclass($1) AS t', [`public.${table}`]);
+      if (chk[0].t) await client.query(sql, [storeId]);
+    };
+
+    // Data turunan pesanan
+    await delIfExists('order_chats', `DELETE FROM order_chats WHERE order_id IN (${orderIds})`);
+    await delIfExists('order_proof_photos', `DELETE FROM order_proof_photos WHERE order_id IN (${orderIds})`);
+    await delIfExists('order_assignments', `DELETE FROM order_assignments WHERE order_id IN (${orderIds})`);
+    await delIfExists('complaints', `DELETE FROM complaints WHERE order_id IN (${orderIds})`);
+    await delIfExists('reviews', `DELETE FROM reviews WHERE store_id = $1 OR order_id IN (${orderIds})`);
+    await delIfExists('orders', 'DELETE FROM orders WHERE store_id = $1');
+
+    // Data turunan toko
+    await delIfExists('withdrawals', 'DELETE FROM withdrawals WHERE store_id = $1');
+    await delIfExists('store_employees', 'DELETE FROM store_employees WHERE store_id = $1');
+    await delIfExists('packages', 'DELETE FROM packages WHERE store_id = $1');
+    await delIfExists('store_schedules', 'DELETE FROM store_schedules WHERE store_id = $1');
+    await delIfExists('store_service_methods', 'DELETE FROM store_service_methods WHERE store_id = $1');
+
+    await client.query('DELETE FROM stores WHERE id = $1', [storeId]);
+
+    await client.query('COMMIT');
+    res.json({ message: `Toko ${rows[0].name} berhasil dihapus permanen` });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(error);
+    res.status(500).json({ message: 'Gagal menghapus toko' });
+  } finally {
+    client.release();
+  }
+});
+
 router.get('/settings', async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM system_settings');
   res.json({ settings: rows });
