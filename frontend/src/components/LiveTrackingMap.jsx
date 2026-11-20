@@ -1,28 +1,37 @@
 import React, { useEffect, useState } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import socket from '../services/socket';
 import api from '../services/api';
 import { Navigation, Clock, ShieldCheck, MapPin } from 'lucide-react';
 
-// Custom icons Leaflet
-const employeeIcon = L.icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+// Penanda berupa titik berwarna, tanpa gambar dari situs luar.
+const dotIcon = (color) =>
+  L.divIcon({
+    className: '',
+    html: `<div style="background:${color};width:22px;height:22px;border-radius:50%;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.45)"></div>`,
+    iconSize: [22, 22],
+    iconAnchor: [11, 11],
+    popupAnchor: [0, -12],
+  });
 
-const customerIcon = L.icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+const employeeIcon = dotIcon('#2563eb'); // biru = pegawai
+const customerIcon = dotIcon('#dc2626'); // merah = lokasi layanan
+
+// Atur peta supaya pegawai dan lokasi tujuan selalu terlihat bersamaan.
+function FitBounds({ points }) {
+  const map = useMap();
+  const valid = points.filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  const key = valid.map((p) => p.join(',')).join('|');
+
+  useEffect(() => {
+    if (valid.length > 1) map.fitBounds(valid, { padding: [40, 40], maxZoom: 16 });
+    else if (valid.length === 1) map.setView(valid[0], 15);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, map]);
+
+  return null;
+}
 
 export default function LiveTrackingMap({ orderId, orderStatus, destination }) {
   const [locations, setLocations] = useState([]);
@@ -32,17 +41,20 @@ export default function LiveTrackingMap({ orderId, orderStatus, destination }) {
   useEffect(() => {
     if (!orderId) return;
 
-    // Fetch initial location data
-    api.get(`/tracking/orders/${orderId}/location`).then((res) => {
-      setTrackingActive(res.data.tracking_active);
-      setLocations(res.data.locations || []);
-      setLoading(false);
-    });
+    // Ambil posisi terakhir yang sudah tersimpan
+    api
+      .get(`/tracking/orders/${orderId}/location`)
+      .then((res) => {
+        setTrackingActive(res.data.tracking_active);
+        setLocations(res.data.locations || []);
+      })
+      .catch((err) => console.error('Gagal memuat lokasi pegawai:', err.response?.data || err.message))
+      .finally(() => setLoading(false));
 
-    // Join WebSocket room
+    // Gabung ke room WebSocket pesanan ini
     socket.emit('join_order_room', orderId);
 
-    // Listen realtime GPS updates dari pegawai
+    // Terima update GPS realtime dari pegawai
     const handleLocationUpdate = (data) => {
       setTrackingActive(true);
       setLocations((prev) => {
@@ -77,10 +89,14 @@ export default function LiveTrackingMap({ orderId, orderStatus, destination }) {
   }
 
   const primaryLoc = locations[0];
+  const isWashing = orderStatus === 'in_progress';
   const destCoords = [parseFloat(destination.latitude), parseFloat(destination.longitude)];
-  const centerCoords = primaryLoc
-    ? [primaryLoc.latitude, primaryLoc.longitude]
-    : destCoords;
+  const centerCoords = primaryLoc ? [primaryLoc.latitude, primaryLoc.longitude] : destCoords;
+
+  const lastUpdate =
+    primaryLoc?.updated_at
+      ? new Date(primaryLoc.updated_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+      : null;
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mb-6">
@@ -95,12 +111,19 @@ export default function LiveTrackingMap({ orderId, orderStatus, destination }) {
               Pelacakan Real-time Pegawai
             </span>
             <h4 className="text-sm font-bold">
-              {primaryLoc ? `${primaryLoc.employee_name} Sedang Menuju Lokasi` : 'Menunggu Sinyal GPS Pegawai...'}
+              {primaryLoc
+                ? isWashing
+                  ? `${primaryLoc.employee_name} sedang mencuci di lokasi Anda`
+                  : `${primaryLoc.employee_name} sedang menuju lokasi`
+                : 'Menunggu sinyal GPS pegawai...'}
             </h4>
+            {lastUpdate && (
+              <p className="text-[11px] text-blue-100 mt-0.5">Posisi terakhir diperbarui pukul {lastUpdate}</p>
+            )}
           </div>
         </div>
 
-        {primaryLoc && (
+        {primaryLoc && !isWashing && (
           <div className="flex items-center gap-4 text-xs bg-black/20 px-3 py-1.5 rounded-xl backdrop-blur">
             <div className="flex items-center gap-1">
               <MapPin className="w-4 h-4 text-amber-300" />
@@ -114,51 +137,41 @@ export default function LiveTrackingMap({ orderId, orderStatus, destination }) {
         )}
       </div>
 
-      {/* Map Leaflet */}
+      {/* Peta */}
       <div className="h-72 w-full relative z-0">
-        <MapContainer
-          center={centerCoords}
-          zoom={14}
-          scrollWheelZoom={false}
-          className="h-full w-full"
-        >
+        <MapContainer center={centerCoords} zoom={14} scrollWheelZoom={false} className="h-full w-full">
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
 
-          {/* Marker Lokasi Pelanggan (Destinasi) */}
+          <FitBounds points={primaryLoc ? [[primaryLoc.latitude, primaryLoc.longitude], destCoords] : [destCoords]} />
+
+          {/* Lokasi layanan (tujuan) */}
           <Marker position={destCoords} icon={customerIcon}>
             <Popup>
               <div className="text-xs">
-                <strong>Lokasi Anda (Cuci Kendaraan)</strong>
+                <strong>Lokasi layanan (alamat Anda)</strong>
               </div>
             </Popup>
           </Marker>
 
-          {/* Marker Posisi Pegawai Realtime */}
+          {/* Posisi pegawai realtime */}
           {locations.map((loc) => (
-            <Marker
-              key={loc.employee_id}
-              position={[loc.latitude, loc.longitude]}
-              icon={employeeIcon}
-            >
+            <Marker key={loc.employee_id} position={[loc.latitude, loc.longitude]} icon={employeeIcon}>
               <Popup>
                 <div className="text-xs">
                   <strong>Pegawai: {loc.employee_name}</strong>
-                  <p>Sisa: {loc.distance_remaining_km} km (~{loc.estimated_arrival_minutes} menit)</p>
+                  {!isWashing && <p>Sisa: {loc.distance_remaining_km} km (~{loc.estimated_arrival_minutes} menit)</p>}
                 </div>
               </Popup>
             </Marker>
           ))}
 
-          {/* Garis rute estimasi antara Pegawai dan Pelanggan */}
+          {/* Garis lurus pegawai ke lokasi layanan */}
           {primaryLoc && (
             <Polyline
-              positions={[
-                [primaryLoc.latitude, primaryLoc.longitude],
-                destCoords,
-              ]}
+              positions={[[primaryLoc.latitude, primaryLoc.longitude], destCoords]}
               color="#2563eb"
               dashArray="6, 8"
             />

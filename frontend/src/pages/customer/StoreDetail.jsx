@@ -4,6 +4,21 @@ import api from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { MapPin, Star } from 'lucide-react';
 
+// Rumus Haversine, sama dengan yang dipakai backend (utils/geo.js), untuk estimasi di layar.
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (v) => (v * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 100) / 100;
+}
+
+// Alamat lama yang tersimpan dengan koordinat bawaan Jakarta (belum pernah diatur di peta).
+const isLegacyDefault = (a) =>
+  Math.abs(parseFloat(a.latitude) + 6.2088) < 0.0001 && Math.abs(parseFloat(a.longitude) - 106.8456) < 0.0001;
+
 export default function StoreDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -17,6 +32,8 @@ export default function StoreDetail() {
   const [hasWater, setHasWater] = useState(true);
   const [bookingDate, setBookingDate] = useState('');
   const [timeSlot, setTimeSlot] = useState('08:00 - 10:00');
+  const [savedAddresses, setSavedAddresses] = useState([]);
+  const [selectedAddressId, setSelectedAddressId] = useState('');
   const [address, setAddress] = useState('');
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(true);
@@ -72,11 +89,26 @@ export default function StoreDetail() {
       .get('/customer/addresses')
       .then((res) => {
         const list = res.data.addresses || [];
+        setSavedAddresses(list);
         const def = list.find((a) => a.is_default) || list[0];
-        if (def) setAddress(def.address_text);
+        if (def) {
+          setSelectedAddressId(String(def.id));
+          setAddress(def.address_text);
+        }
       })
       .catch((err) => console.error('Gagal memuat alamat:', err.response?.data || err.message));
   }, [user]);
+
+  // Home service & jemput-antar butuh titik lokasi pelanggan; antar sendiri tidak.
+  const needsLocation = selectedMethod !== 'self_service';
+  const chosenAddress = savedAddresses.find((a) => String(a.id) === String(selectedAddressId)) || null;
+  const chosenIsLegacy = chosenAddress ? isLegacyDefault(chosenAddress) : false;
+
+  const handlePickAddress = (e) => {
+    const picked = savedAddresses.find((a) => String(a.id) === e.target.value);
+    setSelectedAddressId(e.target.value);
+    if (picked) setAddress(picked.address_text);
+  };
 
   const handleCheckout = async (e) => {
     e.preventDefault();
@@ -93,6 +125,12 @@ export default function StoreDetail() {
     if (!bookingDate) {
       return alert('Pilih tanggal cuci.');
     }
+    if (needsLocation && !chosenAddress) {
+      return alert('Pilih alamat tersimpan yang sudah punya titik lokasi, atau tambahkan dulu di Profil.');
+    }
+    if (needsLocation && chosenIsLegacy) {
+      return alert('Alamat ini belum punya titik lokasi yang benar. Hapus lalu tambahkan ulang di Profil dengan titik di peta.');
+    }
 
     setSubmitting(true);
     try {
@@ -101,9 +139,16 @@ export default function StoreDetail() {
         vehicle_id: parseInt(selectedVehicle, 10),
         package_id: selectedPackage.id,
         service_method: selectedMethod,
-        service_address: address || 'Alamat lokasi pelanggan',
-        service_latitude: parseFloat(storeData.store.latitude),
-        service_longitude: parseFloat(storeData.store.longitude),
+        service_address: needsLocation
+          ? address || chosenAddress.address_text
+          : storeData.store.address_text,
+        // Koordinat tujuan = lokasi pelanggan (alamat tersimpan). Untuk antar sendiri = lokasi toko.
+        service_latitude: needsLocation
+          ? parseFloat(chosenAddress.latitude)
+          : parseFloat(storeData.store.latitude),
+        service_longitude: needsLocation
+          ? parseFloat(chosenAddress.longitude)
+          : parseFloat(storeData.store.longitude),
         has_water_source: hasWater,
         customer_notes: notes,
         booking_date: bookingDate,
@@ -134,6 +179,25 @@ export default function StoreDetail() {
   }
 
   const { store, packages = [], reviews = [] } = storeData;
+
+  // Estimasi jarak & ongkir (backend tetap yang menentukan angka final).
+  const estimate =
+    needsLocation && chosenAddress && !chosenIsLegacy
+      ? (() => {
+        const km = haversineKm(
+          parseFloat(chosenAddress.latitude),
+          parseFloat(chosenAddress.longitude),
+          parseFloat(store.latitude),
+          parseFloat(store.longitude)
+        );
+        return {
+          km,
+          fee: Math.round(km * parseFloat(store.delivery_fee_per_km)),
+          max: parseFloat(store.max_service_distance_km),
+          tooFar: km > parseFloat(store.max_service_distance_km),
+        };
+      })()
+      : null;
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -338,17 +402,74 @@ export default function StoreDetail() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 mb-1">Alamat Lengkap</label>
-              <textarea
-                required
-                rows={2}
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                placeholder="Jl. Mawar No. 12..."
-                className="w-full border border-slate-300 rounded-lg p-2 text-xs"
-              />
-            </div>
+            {/* Lokasi layanan (tidak perlu untuk antar sendiri ke toko) */}
+            {needsLocation ? (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Lokasi Layanan</label>
+                  {savedAddresses.length === 0 ? (
+                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      Belum ada alamat tersimpan.{' '}
+                      <Link to="/profile" className="font-bold underline">
+                        Tambah alamat di Profil
+                      </Link>
+                      , lalu kembali ke sini.
+                    </p>
+                  ) : (
+                    <select
+                      value={selectedAddressId}
+                      onChange={handlePickAddress}
+                      className="w-full border border-slate-300 rounded-lg p-2 text-xs"
+                    >
+                      {savedAddresses.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.label}: {a.address_text}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  {chosenIsLegacy && (
+                    <p className="mt-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      Alamat ini belum punya titik lokasi yang benar.{' '}
+                      <Link to="/profile" className="font-bold underline">
+                        Hapus dan tambahkan ulang di Profil
+                      </Link>
+                      .
+                    </p>
+                  )}
+
+                  {estimate && (
+                    <p
+                      className={`mt-2 text-xs rounded-lg p-2.5 ${estimate.tooFar
+                        ? 'bg-red-50 text-red-700 border border-red-200'
+                        : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                        }`}
+                    >
+                      {estimate.tooFar
+                        ? `Lokasi ini ${estimate.km} km dari toko, melebihi jangkauan ${estimate.max} km.`
+                        : `Jarak ke toko ±${estimate.km} km, estimasi ongkir Rp ${estimate.fee.toLocaleString('id-ID')}.`}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Alamat Lengkap</label>
+                  <textarea
+                    required
+                    rows={2}
+                    value={address}
+                    onChange={(e) => setAddress(e.target.value)}
+                    placeholder="Jl. Mawar No. 12..."
+                    className="w-full border border-slate-300 rounded-lg p-2 text-xs"
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                Anda mengantar sendiri kendaraan ke toko, jadi tidak ada ongkir. Alamat toko: {store.address_text}
+              </p>
+            )}
 
             <div>
               <label className="block text-xs font-semibold text-slate-600 mb-1">Catatan Tambahan</label>

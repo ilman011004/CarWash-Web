@@ -1,12 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import api from '../../services/api';
-import { Car, MapPin, Plus, Trash2 } from 'lucide-react';
+import { Car, MapPin, Plus, Trash2, AlertTriangle } from 'lucide-react';
+import LocationPicker from '../owner/store-registration/LocationPicker';
+
+const EMPTY_ADDRESS = { label: 'Rumah', address_text: '', latitude: null, longitude: null, notes: '' };
+
+// Alamat yang dibuat sebelum ada pemilih peta memakai koordinat bawaan Jakarta (Monas),
+// bukan lokasi sebenarnya. Alamat seperti itu perlu dihapus dan dibuat ulang.
+const isLegacyDefault = (a) =>
+  Math.abs(parseFloat(a.latitude) + 6.2088) < 0.0001 && Math.abs(parseFloat(a.longitude) - 106.8456) < 0.0001;
 
 export default function Profile() {
   const [vehicles, setVehicles] = useState([]);
   const [addresses, setAddresses] = useState([]);
   const [newVehicle, setNewVehicle] = useState({ vehicle_type: 'mobil', brand: '', model: '', plate_number: '' });
-  const [newAddress, setNewAddress] = useState({ label: 'Rumah', address_text: '', latitude: -6.2088, longitude: 106.8456, notes: '' });
+  const [newAddress, setNewAddress] = useState(EMPTY_ADDRESS);
+  const [locationError, setLocationError] = useState('');
+  const [pickerKey, setPickerKey] = useState(0); // dinaikkan setelah simpan agar peta & kolom koordinat bersih lagi
 
   const loadData = () => {
     api.get('/customer/vehicles').then((res) => setVehicles(res.data.vehicles));
@@ -39,12 +49,20 @@ export default function Profile() {
 
   const handleAddAddress = async (e) => {
     e.preventDefault();
+
+    if (newAddress.latitude == null || newAddress.longitude == null) {
+      setLocationError('Tentukan titik lokasi alamat: klik peta, cari alamat, atau ketik koordinat.');
+      return;
+    }
+    setLocationError('');
+
     try {
       await api.post('/customer/addresses', newAddress);
-      setNewAddress({ label: 'Rumah', address_text: '', latitude: -6.2088, longitude: 106.8456, notes: '' });
+      setNewAddress(EMPTY_ADDRESS);
+      setPickerKey((k) => k + 1);
       loadData();
     } catch (err) {
-      alert('Gagal menambah alamat');
+      alert(err.response?.data?.message || 'Gagal menambah alamat');
     }
   };
 
@@ -127,14 +145,26 @@ export default function Profile() {
         </h2>
 
         <div className="space-y-3 mb-6">
+          {addresses.length === 0 && (
+            <p className="text-xs text-slate-400">Belum ada alamat tersimpan.</p>
+          )}
           {addresses.map((a) => (
-            <div key={a.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex justify-between items-start text-xs">
-              <div>
+            <div key={a.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex justify-between items-start gap-3 text-xs">
+              <div className="min-w-0">
                 <span className="font-bold text-slate-800">{a.label}</span>
                 <p className="text-slate-600 mt-0.5">{a.address_text}</p>
                 {a.notes && <p className="text-slate-400 italic">Catatan: {a.notes}</p>}
+                <p className="text-[11px] font-mono text-slate-400 mt-1">
+                  {parseFloat(a.latitude).toFixed(6)}, {parseFloat(a.longitude).toFixed(6)}
+                </p>
+                {isLegacyDefault(a) && (
+                  <p className="mt-1.5 inline-flex items-start gap-1 text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    Titik lokasi alamat ini belum diatur (masih koordinat bawaan Jakarta). Hapus lalu tambahkan ulang dengan titik yang benar.
+                  </p>
+                )}
               </div>
-              <button onClick={() => handleDeleteAddress(a.id)} className="text-red-500 hover:text-red-700">
+              <button onClick={() => handleDeleteAddress(a.id)} className="text-red-500 hover:text-red-700 shrink-0">
                 <Trash2 className="w-4 h-4" />
               </button>
             </div>
@@ -166,6 +196,21 @@ export default function Profile() {
             onChange={(e) => setNewAddress({ ...newAddress, address_text: e.target.value })}
             className="w-full border border-slate-300 rounded-lg p-2"
           />
+
+          <div>
+            <p className="text-xs font-semibold text-slate-600 mb-2">Titik Lokasi di Peta</p>
+            <LocationPicker
+              key={pickerKey}
+              latitude={newAddress.latitude}
+              longitude={newAddress.longitude}
+              error={locationError}
+              onChange={(latitude, longitude) => {
+                setNewAddress((prev) => ({ ...prev, latitude, longitude }));
+                if (latitude != null) setLocationError('');
+              }}
+            />
+          </div>
+
           <button type="submit" className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold flex items-center gap-1">
             <Plus className="w-4 h-4" /> Tambah Alamat
           </button>
