@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import api from '../../services/api';
 import { Droplets } from 'lucide-react';
 
 export default function Login() {
@@ -11,6 +12,16 @@ export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
 
+  // Pelanggan yang belum punya kendaraan atau alamat diarahkan ke Profil
+  const customerNeedsSetup = async () => {
+    try {
+      const [v, a] = await Promise.all([api.get('/customer/vehicles'), api.get('/customer/addresses')]);
+      return (v.data.vehicles || []).length === 0 || (a.data.addresses || []).length === 0;
+    } catch {
+      return false;
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
@@ -20,6 +31,7 @@ export default function Login() {
       if (user.role === 'owner') navigate('/owner');
       else if (user.role === 'employee') navigate('/employee');
       else if (user.role === 'admin') navigate('/admin');
+      else if (await customerNeedsSetup()) navigate('/profile');
       else navigate('/');
     } catch (err) {
       setError(err.response?.data?.message || 'Login gagal');

@@ -22,7 +22,7 @@ export default function Register() {
     try {
       const user = await register({ name, email, phone, password, role });
       if (user.role === 'owner') navigate('/owner');
-      else navigate('/');
+      else navigate('/profile'); // pelanggan baru: lengkapi kendaraan & alamat dulu
     } catch (err) {
       setError(err.response?.data?.message || 'Pendaftaran gagal');
     } finally {
@@ -77,6 +77,12 @@ export default function Register() {
             {role === 'owner' && (
               <p className="text-[11px] text-slate-500 mt-2">
                 Setelah akun dibuat, Anda akan diminta mengisi data toko untuk didaftarkan di CarWash Hub.
+              </p>
+            )}
+            {role === 'customer' && (
+              <p className="text-[11px] text-slate-500 mt-2">
+                Setelah akun dibuat, Anda akan diminta menambahkan kendaraan dan alamat (titik di peta) agar bisa
+                memesan dan melihat toko terdekat.
               </p>
             )}
           </div>

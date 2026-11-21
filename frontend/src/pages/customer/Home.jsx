@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import { dummyStores } from '../../services/mockData';
 import {
   MapPin,
@@ -12,52 +13,84 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
+// Alamat lama dengan koordinat bawaan Jakarta (belum diatur di peta) tidak dipakai untuk jarak.
+const isLegacyDefault = (a) =>
+  Math.abs(parseFloat(a.latitude) + 6.2088) < 0.0001 && Math.abs(parseFloat(a.longitude) - 106.8456) < 0.0001;
+
 export default function Home() {
+  const { user } = useAuth();
+  const isCustomer = user?.role === 'customer';
+
   const [stores, setStores] = useState([]);
   const [loading, setLoading] = useState(true);
   const [isDemo, setIsDemo] = useState(false); // true jika backend tidak bisa dihubungi
-  const [outOfRange, setOutOfRange] = useState(false); // true jika tidak ada toko di radius pengguna
-  const [userCoords, setUserCoords] = useState(null); // null = lokasi belum diketahui
+  const [userCoords, setUserCoords] = useState(null); // dari alamat utama pelanggan; null = tanpa jarak
+  const [addressChecked, setAddressChecked] = useState(false); // pelanggan: sudah selesai cek alamat?
+  const [hasUsableAddress, setHasUsableAddress] = useState(false);
   const [serviceMethod, setServiceMethod] = useState('');
   const [minRating, setMinRating] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Ambil lokasi pengguna. Jika ditolak, koordinat tetap null (tidak memakai Jakarta).
-  useEffect(() => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => setUserCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-        () => setUserCoords(null)
-      );
-    }
-  }, []);
-
-  // Ambil daftar toko dari API
+  // Pelanggan login: ambil alamat utama untuk menghitung jarak. Pengunjung lain: tanpa jarak.
   useEffect(() => {
     let cancelled = false;
 
-    const baseParams = {};
-    if (serviceMethod) baseParams.service_method = serviceMethod;
-    if (minRating) baseParams.min_rating = minRating;
+    if (!isCustomer) {
+      setUserCoords(null);
+      setHasUsableAddress(false);
+      setAddressChecked(true);
+      return;
+    }
+
+    setAddressChecked(false);
+    api
+      .get('/customer/addresses')
+      .then((res) => {
+        if (cancelled) return;
+        const list = (res.data.addresses || []).filter((a) => !isLegacyDefault(a));
+        const def = list.find((a) => a.is_default) || list[0];
+        if (def) {
+          setUserCoords({ lat: parseFloat(def.latitude), lng: parseFloat(def.longitude) });
+          setHasUsableAddress(true);
+        } else {
+          setUserCoords(null);
+          setHasUsableAddress(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setUserCoords(null);
+          setHasUsableAddress(false);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAddressChecked(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isCustomer]);
+
+  // Ambil daftar toko dari API (setelah status alamat pelanggan diketahui)
+  useEffect(() => {
+    if (!addressChecked) return;
+    let cancelled = false;
+
+    const params = {};
+    if (serviceMethod) params.service_method = serviceMethod;
+    if (minRating) params.min_rating = minRating;
+    if (userCoords) {
+      params.lat = userCoords.lat;
+      params.lng = userCoords.lng;
+    }
 
     const load = async () => {
       setLoading(true);
       setIsDemo(false);
-      setOutOfRange(false);
-
       try {
-        const params = userCoords ? { ...baseParams, lat: userCoords.lat, lng: userCoords.lng } : baseParams;
         const res = await api.get('/stores', { params });
-        let list = res.data.stores || [];
-
-        // Ada lokasi tapi tidak ada toko dalam jangkauan: tampilkan semua toko tanpa filter jarak
-        if (list.length === 0 && userCoords) {
-          const resAll = await api.get('/stores', { params: baseParams });
-          list = resAll.data.stores || [];
-          if (list.length > 0 && !cancelled) setOutOfRange(true);
-        }
-
-        if (!cancelled) setStores(list);
+        if (!cancelled) setStores(res.data.stores || []);
       } catch (err) {
         console.error('Gagal memuat toko:', err.response?.data || err.message);
         if (!cancelled) {
@@ -81,7 +114,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [userCoords, serviceMethod, minRating]);
+  }, [addressChecked, userCoords, serviceMethod, minRating]);
 
   const q = searchQuery.toLowerCase();
   const displayStores = stores.filter(
@@ -96,6 +129,11 @@ export default function Home() {
       : typeof sm === 'string'
         ? sm.replace(/[{}]/g, '').split(',').filter(Boolean)
         : [];
+
+  // Teks status di bawah kotak pencarian
+  let locationHint = 'Masuk sebagai pelanggan untuk melihat toko terdekat dari alamat Anda';
+  if (isCustomer && hasUsableAddress) locationHint = 'Toko diurutkan dari yang terdekat dengan alamat utama Anda';
+  if (isCustomer && addressChecked && !hasUsableAddress) locationHint = 'Tambahkan alamat untuk melihat toko terdekat';
 
   return (
     <div className="min-h-screen bg-slate-50/60 pb-16">
@@ -181,14 +219,10 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between text-xs text-slate-500">
+          <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
             <span className="flex items-center gap-1.5 font-medium text-blue-600">
-              <Navigation className="w-3.5 h-3.5 animate-pulse" />
-              <span>
-                {userCoords
-                  ? 'Toko diurutkan dari yang terdekat dengan lokasi Anda'
-                  : 'Aktifkan izin lokasi untuk melihat jarak toko'}
-              </span>
+              <Navigation className="w-3.5 h-3.5" />
+              <span>{locationHint}</span>
             </span>
             <span className="text-slate-400">
               Menampilkan <strong>{displayStores.length}</strong> toko mitra siap melayani
@@ -201,12 +235,33 @@ export default function Home() {
       <div className="max-w-7xl mx-auto px-4 pt-12">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-2xl font-black text-slate-800 tracking-tight">Toko Cuci Terdekat</h2>
+            <h2 className="text-2xl font-black text-slate-800 tracking-tight">
+              {userCoords ? 'Toko Cuci Terdekat' : 'Semua Toko Cuci'}
+            </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               Pilih toko favorit Anda untuk melihat paket cuci dan jadwal slot
             </p>
           </div>
         </div>
+
+        {/* Pelanggan belum punya alamat */}
+        {isCustomer && addressChecked && !hasUsableAddress && (
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs">
+            <span className="flex items-start gap-2">
+              <MapPin className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <span>
+                <strong>Lengkapi alamat Anda</strong> agar kami bisa menampilkan toko terdekat, dan agar Anda
+                bisa memesan.
+              </span>
+            </span>
+            <Link
+              to="/profile"
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg"
+            >
+              Tambah Alamat
+            </Link>
+          </div>
+        )}
 
         {isDemo && (
           <div className="mb-6 flex items-start gap-2 p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs">
@@ -214,15 +269,6 @@ export default function Home() {
             <span>
               Server tidak dapat dihubungi, jadi yang tampil adalah data contoh dan belum bisa dipesan.
               Pastikan backend berjalan di port 4000.
-            </span>
-          </div>
-        )}
-
-        {outOfRange && (
-          <div className="mb-6 flex items-start gap-2 p-4 rounded-xl bg-sky-50 border border-sky-200 text-sky-900 text-xs">
-            <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            <span>
-              Belum ada toko dalam jangkauan lokasi Anda. Berikut semua toko yang tersedia.
             </span>
           </div>
         )}
@@ -269,9 +315,16 @@ export default function Home() {
                     </div>
 
                     {store.distance_km != null && (
-                      <div className="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur-md text-white text-[11px] font-semibold px-2.5 py-0.5 rounded-lg flex items-center gap-1 shadow">
-                        <MapPin className="w-3 h-3 text-cyan-400" />
-                        <span>{Number(store.distance_km).toFixed(1)} km</span>
+                      <div className="absolute bottom-3 left-3 flex items-center gap-1.5">
+                        <div className="bg-slate-900/80 backdrop-blur-md text-white text-[11px] font-semibold px-2.5 py-0.5 rounded-lg flex items-center gap-1 shadow">
+                          <MapPin className="w-3 h-3 text-cyan-400" />
+                          <span>{Number(store.distance_km).toFixed(1)} km</span>
+                        </div>
+                        {store.in_range === false && (
+                          <div className="bg-red-600/90 text-white text-[10px] font-bold px-2 py-0.5 rounded-lg shadow">
+                            Di luar jangkauan
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -290,10 +343,10 @@ export default function Home() {
                         <span
                           key={m}
                           className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${m === 'home_service'
-                              ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                              : m === 'pickup_delivery'
-                                ? 'bg-purple-50 text-purple-700 border border-purple-200'
-                                : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
+                            : m === 'pickup_delivery'
+                              ? 'bg-purple-50 text-purple-700 border border-purple-200'
+                              : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                             }`}
                         >
                           {m === 'home_service' && '🏠 Home Service'}

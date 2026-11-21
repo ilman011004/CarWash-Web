@@ -307,3 +307,23 @@ VALUES
     ('store_confirmation_timeout_minutes', '30', 'Batas waktu konfirmasi pesanan oleh toko sebelum auto-cancel'),
     ('auto_confirm_hours', '24', 'Batas waktu pesanan otomatis dikonfirmasi setelah status selesai')
 ON CONFLICT (key) DO NOTHING;
+
+-- 19. KONFIRMASI PEGAWAI ATAS PENUGASAN
+-- Penugasan baru dibuat 'pending' oleh aplikasi, lalu pegawai menerima ('accepted') atau menolak ('declined').
+-- Data lama dianggap sudah diterima, jadi pesanan yang sedang berjalan tidak terganggu.
+ALTER TABLE order_assignments
+    ADD COLUMN IF NOT EXISTS response_status VARCHAR(20) NOT NULL DEFAULT 'accepted',
+    ADD COLUMN IF NOT EXISTS responded_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN IF NOT EXISTS decline_reason TEXT;
+
+DO $$ BEGIN
+    ALTER TABLE order_assignments
+        ADD CONSTRAINT order_assignments_response_status_check
+        CHECK (response_status IN ('pending', 'accepted', 'declined'));
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+-- Mempercepat pengecekan jadwal bentrok pegawai
+CREATE INDEX IF NOT EXISTS idx_orders_booking_date ON orders (booking_date);
+CREATE INDEX IF NOT EXISTS idx_order_assignments_employee ON order_assignments (employee_id);

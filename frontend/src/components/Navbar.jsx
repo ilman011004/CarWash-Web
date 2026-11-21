@@ -1,16 +1,82 @@
-import React from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useRef } from 'react';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { Droplets, User, LogOut, Shield, Store, Briefcase, Sparkles } from 'lucide-react';
+import api from '../services/api';
+import {
+  Droplets,
+  LogOut,
+  Shield,
+  Store,
+  Briefcase,
+  Sparkles,
+  ChevronDown,
+  MapPin,
+} from 'lucide-react';
+
+const ROLE_LABEL = {
+  customer: 'Pelanggan',
+  owner: 'Pemilik Toko',
+  employee: 'Pegawai',
+  admin: 'Admin',
+};
 
 export default function Navbar() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  const [open, setOpen] = useState(false);
+  const [profileIncomplete, setProfileIncomplete] = useState(false);
+  const menuRef = useRef(null);
 
   const handleLogout = () => {
+    setOpen(false);
     logout();
     navigate('/login');
   };
+
+  // Tutup dropdown saat pindah halaman
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
+
+  // Tutup dropdown saat klik di luar atau tekan Escape
+  useEffect(() => {
+    const onClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, []);
+
+  // Pelanggan: cek apakah kendaraan/alamat sudah lengkap (untuk titik penanda)
+  useEffect(() => {
+    if (!user || user.role !== 'customer') {
+      setProfileIncomplete(false);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([api.get('/customer/vehicles'), api.get('/customer/addresses')])
+      .then(([v, a]) => {
+        if (cancelled) return;
+        const noVehicle = (v.data.vehicles || []).length === 0;
+        const noAddress = (a.data.addresses || []).length === 0;
+        setProfileIncomplete(noVehicle || noAddress);
+      })
+      .catch(() => {
+        if (!cancelled) setProfileIncomplete(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user, location.pathname]);
 
   return (
     <header className="bg-white/90 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-50">
@@ -42,20 +108,12 @@ export default function Navbar() {
           {user ? (
             <div className="flex items-center gap-3">
               {user.role === 'customer' && (
-                <>
-                  <Link
-                    to="/orders"
-                    className="text-slate-600 hover:text-blue-600 transition px-3 py-1.5 rounded-lg hover:bg-slate-50"
-                  >
-                    Pesanan Saya
-                  </Link>
-                  <Link
-                    to="/profile"
-                    className="text-slate-600 hover:text-blue-600 transition px-3 py-1.5 rounded-lg hover:bg-slate-50"
-                  >
-                    Kendaraan & Alamat
-                  </Link>
-                </>
+                <Link
+                  to="/orders"
+                  className="text-slate-600 hover:text-blue-600 transition px-3 py-1.5 rounded-lg hover:bg-slate-50"
+                >
+                  Pesanan Saya
+                </Link>
               )}
 
               {user.role === 'owner' && (
@@ -90,21 +148,75 @@ export default function Navbar() {
 
               <div className="h-5 w-[1px] bg-slate-200 mx-1" />
 
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 text-white font-bold text-xs flex items-center justify-center shadow-sm">
-                  {user.name.charAt(0).toUpperCase()}
-                </div>
-                <div className="hidden sm:block text-left">
-                  <span className="text-xs font-bold text-slate-800 block leading-tight">{user.name}</span>
-                  <span className="text-[10px] text-slate-400 capitalize">{user.role}</span>
-                </div>
+              {/* Dropdown Profil */}
+              <div className="relative" ref={menuRef}>
                 <button
-                  onClick={handleLogout}
-                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition ml-1"
-                  title="Keluar"
+                  type="button"
+                  onClick={() => setOpen((o) => !o)}
+                  aria-haspopup="menu"
+                  aria-expanded={open}
+                  className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-100 transition"
                 >
-                  <LogOut className="w-4 h-4" />
+                  <span className="relative">
+                    <span className="w-8 h-8 rounded-full bg-gradient-to-tr from-blue-500 to-indigo-600 text-white font-bold text-xs flex items-center justify-center shadow-sm">
+                      {(user.name || '?').charAt(0).toUpperCase()}
+                    </span>
+                    {profileIncomplete && (
+                      <span
+                        className="absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full bg-orange-500 border-2 border-white"
+                        title="Lengkapi kendaraan dan alamat"
+                      />
+                    )}
+                  </span>
+                  <span className="hidden sm:block text-left">
+                    <span className="text-xs font-bold text-slate-800 block leading-tight max-w-[110px] truncate">
+                      {user.name}
+                    </span>
+                    <span className="text-[10px] text-slate-400">{ROLE_LABEL[user.role] || user.role}</span>
+                  </span>
+                  <ChevronDown
+                    className={`w-4 h-4 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`}
+                  />
                 </button>
+
+                {open && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 mt-2 w-60 bg-white rounded-xl border border-slate-200 shadow-xl py-1.5 z-50"
+                  >
+                    <div className="px-4 py-2 border-b border-slate-100 sm:hidden">
+                      <p className="text-sm font-bold text-slate-800 truncate">{user.name}</p>
+                      <p className="text-[11px] text-slate-400">{ROLE_LABEL[user.role] || user.role}</p>
+                    </div>
+
+                    {user.role === 'customer' && (
+                      <Link
+                        to="/profile"
+                        role="menuitem"
+                        onClick={() => setOpen(false)}
+                        className="flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50"
+                      >
+                        <MapPin className="w-4 h-4 text-indigo-600" />
+                        <span className="flex-1">Kendaraan & Alamat</span>
+                        {profileIncomplete && (
+                          <span className="text-[10px] font-bold text-orange-700 bg-orange-100 px-2 py-0.5 rounded-full">
+                            Lengkapi
+                          </span>
+                        )}
+                      </Link>
+                    )}
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={handleLogout}
+                      className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-600 hover:bg-red-50"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      Keluar
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           ) : (

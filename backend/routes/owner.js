@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
+import { findEmployeeConflicts } from '../utils/scheduling.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
@@ -239,7 +240,49 @@ router.post('/employees', requireAuth, requireRole('owner'), async (req, res) =>
   }
 });
 
-// 6a. Terima pesanan & tugaskan pegawai (home service minimal 2)
+// ---- Penugasan pegawai ----------------------------------------------------------
+
+// Pesan ramah untuk bentrok jadwal.
+const conflictMessage = (conflicts) =>
+  'Jadwal bentrok: ' +
+  Object.values(conflicts)
+    .map((c) => `${c.employee_name} sudah bertugas di #${c.order_code} (${c.time_slot})`)
+    .join('; ') +
+  '.';
+
+// Kunci baris pegawai (termasuk keanggotaan toko lain dari akun yang sama), lalu cek bentrok.
+// Kunci diurutkan berdasarkan id agar dua penugasan bersamaan tidak saling deadlock. Penugasan
+// kedua menunggu yang pertama selesai lalu melihat hasilnya, jadi tidak mungkin ada pegawai yang dobel.
+async function lockAndCheckConflicts(client, orderId, employeeIds) {
+  if (employeeIds.length === 0) return {};
+  await client.query(
+    `SELECT se.id FROM store_employees se
+     WHERE se.user_id IN (SELECT user_id FROM store_employees WHERE id = ANY($1::int[]))
+     ORDER BY se.id
+     FOR UPDATE`,
+    [employeeIds]
+  );
+  return findEmployeeConflicts(client, { orderId, employeeIds });
+}
+
+const parseEmployeeIds = (body) =>
+  [...new Set((body.employee_ids || []).map(Number))].filter(Number.isInteger);
+
+// Ambil pesanan milik owner ini (lewat pemilik toko, bukan satu toko saja,
+// supaya cocok dengan daftar pesanan di dashboard).
+async function getOwnerOrder(db, orderId, ownerId) {
+  const { rows } = await db.query(
+    `SELECT o.* FROM orders o
+     JOIN stores s ON s.id = o.store_id
+     WHERE o.id = $1 AND s.owner_id = $2`,
+    [orderId, ownerId]
+  );
+  return rows[0] || null;
+}
+
+// 6a. Terima pesanan & tugaskan pegawai (home service minimal 2).
+// Pegawai yang dipilih harus bebas pada tanggal & jam tersebut. Penugasan dibuat 'pending' dan baru
+// resmi setelah pegawai menerimanya di dashboard mereka.
 router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async (req, res) => {
   const client = await pool.connect();
   try {
@@ -249,17 +292,9 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
     const orderId = Number(req.params.orderId);
     if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'ID pesanan tidak valid' });
 
-    const employeeIds = [...new Set((req.body.employee_ids || []).map(Number))].filter(Number.isInteger);
+    const employeeIds = parseEmployeeIds(req.body);
 
-    // Cari pesanan lewat pemilik toko (bukan lewat satu toko saja),
-    // supaya cocok dengan daftar pesanan yang tampil di dashboard.
-    const { rows: orderRows } = await client.query(
-      `SELECT o.* FROM orders o
-       JOIN stores s ON s.id = o.store_id
-       WHERE o.id = $1 AND s.owner_id = $2`,
-      [orderId, req.user.id]
-    );
-    const order = orderRows[0];
+    const order = await getOwnerOrder(client, orderId, req.user.id);
     if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
 
     if (order.order_status !== 'waiting_store_confirmation') {
@@ -285,10 +320,25 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
     }
 
     await client.query('BEGIN');
+
+    // Kunci pesanan & pastikan statusnya belum berubah (mis. akibat klik ganda)
+    const { rows: locked } = await client.query('SELECT order_status FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+    if (locked[0].order_status !== 'waiting_store_confirmation') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Pesanan ini sudah diproses.' });
+    }
+
+    const conflicts = await lockAndCheckConflicts(client, orderId, employeeIds);
+    if (Object.keys(conflicts).length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: conflictMessage(conflicts), conflicts });
+    }
+
     await client.query('DELETE FROM order_assignments WHERE order_id = $1', [orderId]);
     for (const empId of employeeIds) {
       await client.query(
-        'INSERT INTO order_assignments (order_id, employee_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        `INSERT INTO order_assignments (order_id, employee_id, response_status)
+         VALUES ($1, $2, 'pending') ON CONFLICT DO NOTHING`,
         [orderId, empId]
       );
     }
@@ -299,7 +349,7 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
     await client.query('COMMIT');
 
     res.json({
-      message: 'Pesanan diterima dan pegawai berhasil ditugaskan!',
+      message: 'Pesanan diterima. Menunggu konfirmasi dari pegawai yang ditugaskan.',
       order: updatedOrder[0],
     });
   } catch (err) {
@@ -308,6 +358,108 @@ router.post('/orders/:orderId/accept', requireAuth, requireRole('owner'), async 
     res.status(500).json({ message: 'Gagal menerima pesanan: ' + err.message });
   } finally {
     client.release();
+  }
+});
+
+// 6c. Ganti / tambah pegawai pada pesanan yang sudah ditugaskan tetapi belum berangkat
+// (misalnya ada pegawai yang menolak). Kirim daftar pegawai yang diinginkan secara lengkap.
+// Pegawai yang sudah menerima tetap diterima; yang baru berstatus 'pending'; yang dihapus
+// dari daftar atau yang pernah menolak dibuat ulang/dibersihkan.
+router.post('/orders/:orderId/reassign', requireAuth, requireRole('owner'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const orderId = Number(req.params.orderId);
+    if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'ID pesanan tidak valid' });
+
+    const employeeIds = parseEmployeeIds(req.body);
+
+    const order = await getOwnerOrder(client, orderId, req.user.id);
+    if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+
+    if (order.order_status !== 'assigned') {
+      return res.status(400).json({ message: 'Pegawai hanya bisa diganti sebelum pesanan berangkat.' });
+    }
+
+    const minEmployees = order.service_method === 'home_service' ? 2 : 1;
+    if (employeeIds.length < minEmployees) {
+      return res.status(400).json({ message: `Minimal ${minEmployees} pegawai harus ditugaskan untuk pesanan ini.` });
+    }
+
+    const { rows: valid } = await client.query(
+      'SELECT id FROM store_employees WHERE store_id = $1 AND id = ANY($2::int[])',
+      [order.store_id, employeeIds]
+    );
+    if (valid.length !== employeeIds.length) {
+      return res.status(400).json({ message: 'Ada pegawai yang bukan pegawai toko pesanan ini.' });
+    }
+
+    await client.query('BEGIN');
+
+    const { rows: locked } = await client.query('SELECT order_status FROM orders WHERE id = $1 FOR UPDATE', [orderId]);
+    if (locked[0].order_status !== 'assigned') {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: 'Pesanan sudah berangkat, pegawai tidak bisa diganti lagi.' });
+    }
+
+    const conflicts = await lockAndCheckConflicts(client, orderId, employeeIds);
+    if (Object.keys(conflicts).length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ message: conflictMessage(conflicts), conflicts });
+    }
+
+    const { rows: current } = await client.query(
+      'SELECT employee_id, response_status FROM order_assignments WHERE order_id = $1',
+      [orderId]
+    );
+    const keep = new Set(
+      current
+        .filter((c) => employeeIds.includes(c.employee_id) && c.response_status !== 'declined')
+        .map((c) => c.employee_id)
+    );
+
+    await client.query('DELETE FROM order_assignments WHERE order_id = $1 AND employee_id <> ALL($2::int[])', [
+      orderId,
+      [...keep],
+    ]);
+    for (const empId of employeeIds) {
+      if (keep.has(empId)) continue;
+      await client.query(
+        `INSERT INTO order_assignments (order_id, employee_id, response_status)
+         VALUES ($1, $2, 'pending') ON CONFLICT DO NOTHING`,
+        [orderId, empId]
+      );
+    }
+    await client.query('UPDATE orders SET updated_at = NOW() WHERE id = $1', [orderId]);
+    await client.query('COMMIT');
+
+    res.json({ message: 'Penugasan diperbarui. Pegawai baru perlu menerima tugas ini.' });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => { });
+    console.error(err);
+    res.status(500).json({ message: 'Gagal memperbarui penugasan: ' + err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// 6d. Ketersediaan tiap pegawai toko pada tanggal & jam pesanan ini (dipakai modal "Tugaskan Pegawai").
+router.get('/orders/:orderId/availability', requireAuth, requireRole('owner'), async (req, res) => {
+  try {
+    const orderId = Number(req.params.orderId);
+    if (!Number.isInteger(orderId)) return res.status(400).json({ message: 'ID pesanan tidak valid' });
+
+    const order = await getOwnerOrder(pool, orderId, req.user.id);
+    if (!order) return res.status(404).json({ message: 'Pesanan tidak ditemukan' });
+
+    const { rows: emps } = await pool.query('SELECT id FROM store_employees WHERE store_id = $1', [order.store_id]);
+    const conflicts = await findEmployeeConflicts(pool, { orderId, employeeIds: emps.map((e) => e.id) });
+
+    res.json({
+      availability: emps.map((e) => ({ store_employee_id: e.id, conflict: conflicts[e.id] || null })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Gagal memeriksa ketersediaan pegawai' });
   }
 });
 

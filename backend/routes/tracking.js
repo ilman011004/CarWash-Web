@@ -22,7 +22,7 @@ router.post('/orders/:orderId/location', requireAuth, requireRole('employee'), a
      JOIN order_assignments oa ON o.id = oa.order_id
      JOIN store_employees se ON oa.employee_id = se.id
      JOIN users u ON se.user_id = u.id
-     WHERE o.id = $1 AND se.user_id = $2`,
+    WHERE o.id = $1 AND se.user_id = $2 AND oa.response_status = 'accepted'`,
     [orderId, req.user.id]
   );
 

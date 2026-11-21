@@ -6,10 +6,19 @@ import { z } from 'zod';
 
 const router = Router();
 
-// GET /api/stores - Pencarian toko terdekat & filter
+// GET /api/stores - Daftar toko.
+// - Tanpa lat & lng (pengunjung belum login): semua toko tampil, tanpa filter/urutan jarak.
+// - Dengan lat & lng (pelanggan login): setiap toko dapat distance_km & in_range,
+//   lalu diurutkan dari terdekat ke terjauh. Toko di luar jangkauan tetap tampil (in_range = false).
+//   Gunakan only_in_range=true atau max_distance=<km> bila ingin menyaring.
 router.get('/', async (req, res) => {
   try {
-    const { lat, lng, service_method, max_distance, min_rating, sort_by } = req.query;
+    const { service_method, max_distance, min_rating, sort_by, only_in_range } = req.query;
+
+    // Koordinat hanya dipakai jika keduanya angka yang valid
+    const latNum = req.query.lat !== undefined && req.query.lat !== '' ? Number(req.query.lat) : NaN;
+    const lngNum = req.query.lng !== undefined && req.query.lng !== '' ? Number(req.query.lng) : NaN;
+    const hasCoords = Number.isFinite(latNum) && Number.isFinite(lngNum);
 
     // Subquery dipakai agar JOIN tidak saling menggandakan baris
     const query = `
@@ -30,18 +39,21 @@ router.get('/', async (req, res) => {
         GROUP BY store_id
       ) m ON m.store_id = s.id
       WHERE s.is_active = true AND s.is_verified = true
+      ORDER BY s.id ASC
     `;
     const { rows } = await pool.query(query);
 
     let stores = rows.map((store) => {
       let distance = null;
-      if (lat && lng) {
-        distance = calculateDistance(
-          parseFloat(lat),
-          parseFloat(lng),
-          parseFloat(store.latitude),
-          parseFloat(store.longitude)
-        );
+      let inRange = null;
+
+      if (hasCoords) {
+        const storeLat = parseFloat(store.latitude);
+        const storeLng = parseFloat(store.longitude);
+        if (Number.isFinite(storeLat) && Number.isFinite(storeLng)) {
+          distance = calculateDistance(latNum, lngNum, storeLat, storeLng);
+          inRange = distance <= parseFloat(store.max_service_distance_km);
+        }
       }
 
       let methods = [];
@@ -56,17 +68,18 @@ router.get('/', async (req, res) => {
         avg_rating: parseFloat(store.avg_rating).toFixed(1),
         review_count: parseInt(store.review_count, 10),
         distance_km: distance,
+        in_range: inRange, // null jika jarak tidak dihitung (pengunjung tanpa koordinat)
         service_methods: methods,
       };
     });
 
-    // Filter jarak jika lat & lng diberikan
-    if (lat && lng) {
-      if (max_distance) {
-        stores = stores.filter((s) => s.distance_km <= parseFloat(max_distance));
-      } else {
-        // Otomatis cek batas jarak layanan toko
-        stores = stores.filter((s) => s.distance_km <= parseFloat(s.max_service_distance_km));
+    // Filter jarak: hanya jika koordinat ada DAN diminta secara eksplisit
+    if (hasCoords) {
+      const maxDist = max_distance !== undefined && max_distance !== '' ? Number(max_distance) : NaN;
+      if (Number.isFinite(maxDist)) {
+        stores = stores.filter((s) => s.distance_km !== null && s.distance_km <= maxDist);
+      } else if (only_in_range === 'true') {
+        stores = stores.filter((s) => s.in_range === true);
       }
     }
 
@@ -83,8 +96,13 @@ router.get('/', async (req, res) => {
     // Pengurutan
     if (sort_by === 'rating') {
       stores.sort((a, b) => parseFloat(b.avg_rating) - parseFloat(a.avg_rating));
-    } else if (lat && lng) {
-      stores.sort((a, b) => (a.distance_km || 0) - (b.distance_km || 0));
+    } else if (hasCoords) {
+      // Terdekat ke terjauh; toko tanpa koordinat valid ditaruh paling akhir
+      stores.sort((a, b) => {
+        const da = a.distance_km ?? Number.POSITIVE_INFINITY;
+        const db = b.distance_km ?? Number.POSITIVE_INFINITY;
+        return da - db;
+      });
     }
 
     res.json({ stores });

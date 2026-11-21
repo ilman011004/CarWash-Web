@@ -204,7 +204,19 @@ router.get('/', requireAuth, async (req, res) => {
     params = [userId];
   } else if (role === 'owner') {
     query = `
-      SELECT o.*, u.name as customer_name, u.phone as customer_phone, p.name as package_name, v.brand as vehicle_brand, v.plate_number
+      SELECT o.*, u.name as customer_name, u.phone as customer_phone, p.name as package_name, v.brand as vehicle_brand, v.plate_number,
+             COALESCE((
+               SELECT json_agg(json_build_object(
+                        'store_employee_id', se.id,
+                        'name', eu.name,
+                        'response_status', oa.response_status,
+                        'decline_reason', oa.decline_reason
+                      ) ORDER BY oa.id)
+               FROM order_assignments oa
+               JOIN store_employees se ON se.id = oa.employee_id
+               JOIN users eu ON eu.id = se.user_id
+               WHERE oa.order_id = o.id
+             ), '[]'::json) AS assignments
       FROM orders o
       JOIN stores s ON o.store_id = s.id
       JOIN users u ON o.customer_id = u.id
